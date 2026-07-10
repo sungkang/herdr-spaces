@@ -1,0 +1,278 @@
+#!/usr/bin/env python3
+"""herdr-spaces — tmux-sessionizer, but for herdr.
+
+Reads a small TOML config listing project folders, shows an fzf picker to
+search/filter them, and on <enter> either focuses the matching herdr
+workspace if one already exists, or creates a new one rooted at that folder.
+
+Bind it to a key in ~/.config/herdr/config.toml (see README) — default prefix+o.
+
+Config (default ~/.config/herdr-spaces/config.toml, or $HERDR_SPACES_CONFIG,
+or --config PATH):
+
+    # each of these: immediate subdirectories become candidates ("fan out")
+    fan = ["~/dev/me", "~/dev/ai", "~/dev/work"]
+
+    # each of these: the directory itself is the candidate (as-is)
+    literal = ["~/dev", "~/.config/herdr"]
+
+    fan_depth = 1                 # dirs at exactly this depth below a fan path
+    include_hidden = false        # include dot-directories when fanning
+    include_open_workspaces = true# also list currently-open workspaces
+    label_style = "name"          # "name" or "parent-name" for new workspaces
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import subprocess
+import sys
+import tomllib
+from pathlib import Path
+
+DEFAULT_CONFIG = Path(
+    os.environ.get("HERDR_SPACES_CONFIG")
+    or Path(
+        os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")
+    ) / "herdr-spaces" / "config.toml"
+)
+
+TAB = "\t"
+
+
+def die(msg: str, code: int = 1) -> "None":
+    print(f"herdr-spaces: {msg}", file=sys.stderr)
+    raise SystemExit(code)
+
+
+# --------------------------------------------------------------------------- #
+# config
+# --------------------------------------------------------------------------- #
+def load_config(path: Path) -> dict:
+    if not path.exists():
+        die(
+            f"no config at {path}\n"
+            f"  create it (see config.example.toml), or set $HERDR_SPACES_CONFIG,\n"
+            f"  or pass --config PATH.",
+            2,
+        )
+    try:
+        with path.open("rb") as fh:
+            cfg = tomllib.load(fh)
+    except tomllib.TOMLDecodeError as e:
+        die(f"invalid TOML in {path}: {e}")
+
+    cfg.setdefault("fan", [])
+    cfg.setdefault("literal", [])
+    cfg.setdefault("fan_depth", 1)
+    cfg.setdefault("include_hidden", False)
+    cfg.setdefault("include_open_workspaces", True)
+    cfg.setdefault("label_style", "name")
+    if cfg["label_style"] not in ("name", "parent-name"):
+        die(f'label_style must be "name" or "parent-name", got {cfg["label_style"]!r}')
+    if not isinstance(cfg["fan"], list) or not isinstance(cfg["literal"], list):
+        die("`fan` and `literal` must be arrays of directory paths")
+    return cfg
+
+
+def expand(p: str) -> Path:
+    return Path(os.path.expandvars(os.path.expanduser(p)))
+
+
+# --------------------------------------------------------------------------- #
+# candidate discovery
+# --------------------------------------------------------------------------- #
+def dirs_at_depth(root: Path, depth: int, include_hidden: bool) -> list[Path]:
+    """Directories exactly `depth` levels below root (depth>=1)."""
+    level = [root]
+    for _ in range(max(1, depth)):
+        nxt: list[Path] = []
+        for d in level:
+            try:
+                for child in d.iterdir():
+                    if not child.is_dir():
+                        continue
+                    if not include_hidden and child.name.startswith("."):
+                        continue
+                    nxt.append(child)
+            except (PermissionError, FileNotFoundError):
+                continue
+        level = nxt
+    return level
+
+
+def gather_dirs(cfg: dict) -> list[Path]:
+    seen: set[str] = set()
+    out: list[Path] = []
+
+    def add(p: Path) -> None:
+        try:
+            rp = p.resolve()
+        except (OSError, RuntimeError):
+            rp = p
+        key = str(rp)
+        if key in seen or not p.is_dir():
+            return
+        seen.add(key)
+        out.append(p)
+
+    for raw in cfg["fan"]:
+        root = expand(raw)
+        if not root.is_dir():
+            continue
+        for d in dirs_at_depth(root, cfg["fan_depth"], cfg["include_hidden"]):
+            add(d)
+    for raw in cfg["literal"]:
+        add(expand(raw))
+
+    out.sort(key=lambda p: str(p).lower())
+    return out
+
+
+# --------------------------------------------------------------------------- #
+# herdr socket API (via the `herdr` CLI)
+# --------------------------------------------------------------------------- #
+def herdr(*args: str) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        ["herdr", *args], capture_output=True, text=True
+    )
+
+
+def list_workspaces() -> list[dict]:
+    cp = herdr("workspace", "list")
+    if cp.returncode != 0:
+        return []
+    try:
+        return json.loads(cp.stdout)["result"]["workspaces"]
+    except (json.JSONDecodeError, KeyError, TypeError):
+        return []
+
+
+def label_for(path: Path, style: str) -> str:
+    name = path.name.replace(".", "_")
+    if style == "parent-name" and path.parent.name:
+        return f"{path.parent.name.replace('.', '_')}/{name}"
+    return name
+
+
+def home_abbrev(path: Path) -> str:
+    s = str(path)
+    home = str(Path.home())
+    return "~" + s[len(home):] if s == home or s.startswith(home + os.sep) else s
+
+
+# --------------------------------------------------------------------------- #
+# picker
+# --------------------------------------------------------------------------- #
+def build_rows(cfg: dict, workspaces: list[dict]) -> list[tuple[str, str, str]]:
+    """Return (display, kind, payload) rows for the picker."""
+    rows: list[tuple[str, str, str]] = []
+    if cfg["include_open_workspaces"]:
+        for ws in workspaces:
+            mark = "●" if ws.get("focused") else "○"
+            rows.append((f"{mark} {ws['label']}", "ws", ws["workspace_id"]))
+    for d in gather_dirs(cfg):
+        rows.append((f"  {home_abbrev(d)}", "dir", str(d)))
+    return rows
+
+
+def run_fzf(rows: list[tuple[str, str, str]]) -> tuple[str, str] | None:
+    lines = [TAB.join(r) for r in rows]
+    # /bin/ls, not `ls`, so a shell alias (e.g. exa/eza) can't break the preview.
+    preview = 'p={3}; if [ -d "$p" ]; then /bin/ls -1p "$p" 2>/dev/null | head -200; else echo "{1}"; fi'
+    args = [
+        "fzf",
+        "--delimiter", TAB,
+        "--with-nth", "1",
+        "--reverse",
+        "--border",
+        "--prompt", "space> ",
+        "--header", "enter: open/focus workspace   esc: cancel",
+        "--preview", preview,
+        "--preview-window", "right,50%,border-left",
+    ]
+    # fzf runs --preview through $SHELL; force POSIX sh so the preview snippet
+    # works even when the host shell is fish/nu/etc. (fish rejects `p=...`).
+    env = {**os.environ, "SHELL": "/bin/sh"}
+    try:
+        cp = subprocess.run(args, input="\n".join(lines), text=True,
+                            stdout=subprocess.PIPE, env=env)
+    except FileNotFoundError:
+        die("fzf not found on PATH — install it (brew install fzf)")
+    sel = cp.stdout.strip()
+    if cp.returncode != 0 or not sel:
+        return None  # cancelled
+    _display, kind, payload = sel.split(TAB, 2)
+    return kind, payload
+
+
+# --------------------------------------------------------------------------- #
+# action
+# --------------------------------------------------------------------------- #
+def open_or_focus(kind: str, payload: str, cfg: dict, workspaces: list[dict],
+                  dry_run: bool) -> None:
+    if kind == "ws":
+        act = ("workspace", "focus", payload)
+        return _run(act, dry_run)
+
+    path = Path(payload)
+    label = label_for(path, cfg["label_style"])
+    existing = next((w for w in workspaces if w.get("label") == label), None)
+    if existing:
+        _run(("workspace", "focus", existing["workspace_id"]), dry_run)
+    else:
+        _run(
+            ("workspace", "create", "--cwd", str(path), "--label", label, "--focus"),
+            dry_run,
+        )
+
+
+def _run(args: tuple[str, ...], dry_run: bool) -> None:
+    if dry_run:
+        print("herdr " + " ".join(args))
+        return
+    cp = herdr(*args)
+    if cp.returncode != 0:
+        die((cp.stderr or cp.stdout or "herdr command failed").strip())
+
+
+# --------------------------------------------------------------------------- #
+# main
+# --------------------------------------------------------------------------- #
+def main() -> None:
+    ap = argparse.ArgumentParser(prog="herdr-spaces", add_help=True,
+                                 description="fzf project-folder picker for herdr workspaces")
+    ap.add_argument("--config", type=Path, default=DEFAULT_CONFIG,
+                    help=f"config file (default: {DEFAULT_CONFIG})")
+    ap.add_argument("--list", action="store_true",
+                    help="print candidate rows and exit (no fzf, no changes)")
+    ap.add_argument("--dry-run", action="store_true",
+                    help="pick, but print the herdr command instead of running it")
+    args = ap.parse_args()
+
+    cfg = load_config(args.config)
+    workspaces = list_workspaces() if cfg["include_open_workspaces"] else []
+
+    if args.list:
+        for display, kind, payload in build_rows(cfg, workspaces):
+            print(f"{kind}\t{payload}\t{display.strip()}")
+        return
+
+    rows = build_rows(cfg, workspaces)
+    if not rows:
+        die("no candidates — check `fan`/`literal` paths in your config")
+
+    picked = run_fzf(rows)
+    if picked is None:
+        return  # cancelled, quietly
+    # workspace list may be stale-free enough; re-use what we fetched
+    open_or_focus(picked[0], picked[1], cfg, workspaces, args.dry_run)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        raise SystemExit(130)

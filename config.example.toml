@@ -1,0 +1,35 @@
+# herdr-spaces config
+# Copy to ~/.config/herdr-spaces/config.toml (or point $HERDR_SPACES_CONFIG at it,
+# or pass --config PATH).
+
+# "fan out": each of these directories contributes its subdirectories as
+# candidates — like `find <dir> -mindepth 1 -maxdepth 1 -type d`.
+fan = [
+  "~/dev/me",
+  "~/dev/ai",
+  "~/dev/work",
+  "~/dev/sketch",
+]
+
+# "literal": each of these directories is offered as-is (the folder itself,
+# not its children). Handy for a catch-all root or a single standalone project.
+literal = [
+  "~/dev",
+]
+
+# How many levels below a `fan` path to collect directories from.
+# 1 = immediate children (default). 2 = grandchildren only (e.g. ~/dev/<org>/<repo>).
+fan_depth = 1
+
+# Include dot-directories (e.g. .config) when fanning. Default false.
+include_hidden = false
+
+# Also list currently-open herdr workspaces at the top of the picker,
+# so you can jump straight to a running one. Default true.
+include_open_workspaces = true
+
+# Label used when CREATING a new workspace, and how "already open?" is matched:
+#   "name"        -> folder basename            (e.g. "herdr-spaces")
+#   "parent-name" -> parent/basename            (e.g. "dev/herdr-spaces")
+# Use "parent-name" if you have same-named folders under different roots.
+label_style = "name"
