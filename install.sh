@@ -29,11 +29,8 @@ cat <<'SNIPPET'
 Next: bind a key in ~/.config/herdr/config.toml, then `herdr server reload-config`.
 
     [[keys.command]]
-    key = "prefix+o"
+    key = "prefix+f"
     type = "pane"
     command = "herdr-spaces"
 
-Note: prefix+o is herdr's default `open_notification_target`. If you also use
-that action, either pick a different key here, or explicitly move it, e.g. add
-`open_notification_target = "prefix+shift+o"` under [keys].
 SNIPPET
