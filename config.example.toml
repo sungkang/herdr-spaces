@@ -4,18 +4,15 @@
 
 # "fan out": each of these directories contributes its subdirectories as
 # candidates — like `find <dir> -mindepth 1 -maxdepth 1 -type d`.
-fan = [
-  "~/dev/me",
-  "~/dev/ai",
-  "~/dev/work",
-  "~/dev/sketch",
-]
+# fan = [
+#   "~/dev/all-folders-inside-this-folder",
+# ]
 
 # "literal": each of these directories is offered as-is (the folder itself,
 # not its children). Handy for a catch-all root or a single standalone project.
-literal = [
-  "~/dev",
-]
+# literal = [
+# 	"~/dev/only-this-folder"
+# ]
 
 # How many levels below a `fan` path to collect directories from.
 # 1 = immediate children (default). 2 = grandchildren only (e.g. ~/dev/<org>/<repo>).
