@@ -65,13 +65,12 @@ Default location `~/.config/herdr-spaces/config.toml` (override with
 `$HERDR_SPACES_CONFIG` or `--config PATH`). See `config.example.toml`.
 
 ```toml
-# fan out: each dir contributes its subdirectories (like find -maxdepth 1 -type d)
-fan = ["~/dev/me", "~/dev/ai", "~/dev/work", "~/dev/sketch"]
+# project folders. A path ending in "/*" fans out: its subdirectories become
+# candidates (like find -maxdepth 1 -type d). A plain path is offered as-is
+# (the folder itself, not its children).
+folders = ["~/dev/me/*", "~/dev/ai/*", "~/dev/work/*", "~/dev/sketch/*", "~/dev"]
 
-# literal: each dir is offered as-is (the folder itself, not its children)
-literal = ["~/dev"]
-
-fan_depth = 1                  # levels below a fan path to collect (1 = immediate children)
+folder_depth = 1               # levels below a "/*" path to collect (1 = immediate children)
 include_hidden = false         # include dot-directories when fanning
 include_open_workspaces = true # list currently-open workspaces at the top too
 label_style = "name"           # "name" (basename) or "parent-name"

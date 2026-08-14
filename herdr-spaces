@@ -10,13 +10,11 @@ Bind it to a key in ~/.config/herdr/config.toml (see README) — default prefix+
 Config (default ~/.config/herdr-spaces/config.toml, or $HERDR_SPACES_CONFIG,
 or --config PATH):
 
-    # each of these: immediate subdirectories become candidates ("fan out")
-    fan = ["~/dev/me", "~/dev/ai", "~/dev/work"]
+    # project folders. A path ending in "/*" fans out: the directories below
+    # it become candidates. A plain path is offered as-is (the folder itself).
+    folders = ["~/dev/me/*", "~/dev/ai/*", "~/dev/work/*", "~/.config/herdr"]
 
-    # each of these: the directory itself is the candidate (as-is)
-    literal = ["~/dev", "~/.config/herdr"]
-
-    fan_depth = 1                 # dirs at exactly this depth below a fan path
+    folder_depth = 1              # dirs at exactly this depth below a "/*" path
     include_hidden = false        # include dot-directories when fanning
     include_open_workspaces = true# also list currently-open workspaces
     label_style = "name"          # "name" or "parent-name" for new workspaces
@@ -64,16 +62,21 @@ def load_config(path: Path) -> dict:
     except tomllib.TOMLDecodeError as e:
         die(f"invalid TOML in {path}: {e}")
 
-    cfg.setdefault("fan", [])
-    cfg.setdefault("literal", [])
-    cfg.setdefault("fan_depth", 1)
+    if "fan" in cfg or "literal" in cfg or "fan_depth" in cfg:
+        die(
+            "`fan`/`literal`/`fan_depth` were replaced by `folders`/`folder_depth`:\n"
+            '  append "/*" to a path to fan out over its subdirectories,\n'
+            "  leave it plain to offer the folder itself."
+        )
+    cfg.setdefault("folders", [])
+    cfg.setdefault("folder_depth", 1)
     cfg.setdefault("include_hidden", False)
     cfg.setdefault("include_open_workspaces", True)
     cfg.setdefault("label_style", "name")
     if cfg["label_style"] not in ("name", "parent-name"):
         die(f'label_style must be "name" or "parent-name", got {cfg["label_style"]!r}')
-    if not isinstance(cfg["fan"], list) or not isinstance(cfg["literal"], list):
-        die("`fan` and `literal` must be arrays of directory paths")
+    if not isinstance(cfg["folders"], list):
+        die("`folders` must be an array of directory paths")
     return cfg
 
 
@@ -118,14 +121,15 @@ def gather_dirs(cfg: dict) -> list[Path]:
         seen.add(key)
         out.append(p)
 
-    for raw in cfg["fan"]:
-        root = expand(raw)
-        if not root.is_dir():
-            continue
-        for d in dirs_at_depth(root, cfg["fan_depth"], cfg["include_hidden"]):
-            add(d)
-    for raw in cfg["literal"]:
-        add(expand(raw))
+    for raw in cfg["folders"]:
+        if raw.endswith("/*"):
+            root = expand(raw[:-2])
+            if not root.is_dir():
+                continue
+            for d in dirs_at_depth(root, cfg["folder_depth"], cfg["include_hidden"]):
+                add(d)
+        else:
+            add(expand(raw))
 
     out.sort(key=lambda p: str(p).lower())
     return out
@@ -262,7 +266,7 @@ def main() -> None:
 
     rows = build_rows(cfg, workspaces)
     if not rows:
-        die("no candidates — check `fan`/`literal` paths in your config")
+        die("no candidates — check `folders` paths in your config")
 
     picked = run_fzf(rows)
     if picked is None:
