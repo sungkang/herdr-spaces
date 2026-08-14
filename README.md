@@ -83,6 +83,7 @@ label_style = "name"           # "name" (basename) or "parent-name"
 | `--list`          | print candidate rows and exit (no fzf, no changes)  |
 | `--dry-run`       | pick, but print the `herdr` command instead of running it |
 | `--config PATH`   | use a specific config file                          |
+| `--default-config` | print a default config to stdout and exit (e.g. `herdr-spaces --default-config > ~/.config/herdr-spaces/config.toml`) |
 
 ## Uninstall
 

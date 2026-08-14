@@ -39,6 +39,39 @@ DEFAULT_CONFIG = Path(
 
 TAB = "\t"
 
+# Printed by --default-config; keep in sync with config.example.toml.
+DEFAULT_CONFIG_TEMPLATE = """\
+# herdr-spaces config
+# Save as ~/.config/herdr-spaces/config.toml (or point $HERDR_SPACES_CONFIG at it,
+# or pass --config PATH).
+
+# Project folders. A path ending in "/*" fans out: the directories below it
+# become candidates — like `find <dir> -mindepth 1 -maxdepth 1 -type d`.
+# A plain path is offered as-is (the folder itself, not its children) —
+# handy for a catch-all root or a single standalone project.
+# folders = [
+#   "~/dev/all-folders-inside-this-folder/*",
+#   "~/dev/only-this-folder",
+# ]
+
+# How many levels below a "/*" path to collect directories from.
+# 1 = immediate children (default). 2 = grandchildren only (e.g. ~/dev/<org>/<repo>).
+folder_depth = 1
+
+# Include dot-directories (e.g. .config) when fanning. Default false.
+include_hidden = false
+
+# Also list currently-open herdr workspaces at the top of the picker,
+# so you can jump straight to a running one. Default true.
+include_open_workspaces = true
+
+# Label used when CREATING a new workspace, and how "already open?" is matched:
+#   "name"        -> folder basename            (e.g. "herdr-spaces")
+#   "parent-name" -> parent/basename            (e.g. "dev/herdr-spaces")
+# Use "parent-name" if you have same-named folders under different roots.
+label_style = "name"
+"""
+
 
 def die(msg: str, code: int = 1) -> "None":
     print(f"herdr-spaces: {msg}", file=sys.stderr)
@@ -250,11 +283,17 @@ def main() -> None:
                                  description="fzf project-folder picker for herdr workspaces")
     ap.add_argument("--config", type=Path, default=DEFAULT_CONFIG,
                     help=f"config file (default: {DEFAULT_CONFIG})")
+    ap.add_argument("--default-config", action="store_true",
+                    help="print a default config to stdout and exit")
     ap.add_argument("--list", action="store_true",
                     help="print candidate rows and exit (no fzf, no changes)")
     ap.add_argument("--dry-run", action="store_true",
                     help="pick, but print the herdr command instead of running it")
     args = ap.parse_args()
+
+    if args.default_config:
+        print(DEFAULT_CONFIG_TEMPLATE, end="")
+        return
 
     cfg = load_config(args.config)
     workspaces = list_workspaces() if cfg["include_open_workspaces"] else []
