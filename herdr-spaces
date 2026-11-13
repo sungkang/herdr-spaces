@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
-"""herdr-spaces — tmux-sessionizer, but for herdr.
+"""herdr-spaces — tmux-sessionizer, but for herdr-app.
 
 Reads a small TOML config listing project folders, shows an fzf picker to
-search/filter them, and on <enter> either focuses the matching herdr
-workspace if one already exists, or creates a new one rooted at that folder.
+search/filter them, and on <enter> either shows the matching herdr-app
+space if one is already open, or creates a new one rooted at that folder.
 
-Bind it to a key in ~/.config/herdr/config.toml (see README) — default prefix+o.
+Bind it to a key in ~/.config/herdr-app/keys.json (see README), e.g. under
+"global":
+    "ctrl-s f": {"command": "pane.split",
+                 "args": {"direction": "down", "argv": ["herdr-spaces"]}}
 
 Config (default ~/.config/herdr-spaces/config.toml, or $HERDR_SPACES_CONFIG,
 or --config PATH):
@@ -16,8 +19,8 @@ or --config PATH):
 
     folder_depth = 1              # dirs at exactly this depth below a "/*" path
     include_hidden = false        # include dot-directories when fanning
-    include_open_workspaces = true# also list currently-open workspaces
-    label_style = "name"          # "name" or "parent-name" for new workspaces
+    include_open_workspaces = true# also list currently-open spaces
+    label_style = "name"          # "name" or "parent-name" for new spaces
 """
 
 from __future__ import annotations
@@ -25,6 +28,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shlex
 import subprocess
 import sys
 import tomllib
@@ -61,11 +65,12 @@ folder_depth = 1
 # Include dot-directories (e.g. .config) when fanning. Default false.
 include_hidden = false
 
-# Also list currently-open herdr workspaces at the top of the picker,
+# Also list currently-open herdr-app spaces at the top of the picker,
 # so you can jump straight to a running one. Default true.
 include_open_workspaces = true
 
-# Label used when CREATING a new workspace, and how "already open?" is matched:
+# Name used when CREATING a new space, and (after its folder) how "already
+# open?" is matched:
 #   "name"        -> folder basename            (e.g. "herdr-spaces")
 #   "parent-name" -> parent/basename            (e.g. "dev/herdr-spaces")
 # Use "parent-name" if you have same-named folders under different roots.
@@ -169,29 +174,65 @@ def gather_dirs(cfg: dict) -> list[Path]:
 
 
 # --------------------------------------------------------------------------- #
-# herdr socket API (via the `herdr` CLI)
+# herdr-app (via the `herdr-app` CLI, which talks to the running window)
 # --------------------------------------------------------------------------- #
-def herdr(*args: str) -> subprocess.CompletedProcess:
-    return subprocess.run(
-        ["herdr", *args], capture_output=True, text=True
-    )
+def herdr_app(*args: str) -> subprocess.CompletedProcess:
+    try:
+        return subprocess.run(
+            ["herdr-app", *args], capture_output=True, text=True
+        )
+    except FileNotFoundError:
+        die("herdr-app not found on PATH")
 
 
-def list_workspaces() -> list[dict]:
-    cp = herdr("workspace", "list")
+def list_spaces() -> list[dict]:
+    """Open spaces from `herdr-app ls` ({"spaces": [...], "recent": [...]}).
+
+    Each is normalized to {id, name, folder, machine, active}. No window
+    running (or unparsable output) means no spaces.
+    """
+    cp = herdr_app("ls")
     if cp.returncode != 0:
         return []
     try:
-        return json.loads(cp.stdout)["result"]["workspaces"]
-    except (json.JSONDecodeError, KeyError, TypeError):
+        raw = json.loads(cp.stdout).get("spaces") or []
+    except (json.JSONDecodeError, AttributeError):
         return []
+    out: list[dict] = []
+    for sp in raw:
+        if not isinstance(sp, dict) or not sp.get("id"):
+            continue
+        out.append({
+            "id": str(sp["id"]),
+            "name": str(sp.get("name") or sp["id"]),
+            # where its new terminals start; "" means that machine's home
+            "folder": str(sp.get("folder") or ""),
+            "machine": sp.get("machine") or None,  # None: this computer
+            "active": bool(sp.get("active")),
+        })
+    return out
 
 
 def label_for(path: Path, style: str) -> str:
-    name = path.name.replace(".", "_")
     if style == "parent-name" and path.parent.name:
-        return f"{path.parent.name.replace('.', '_')}/{name}"
-    return name
+        return f"{path.parent.name}/{path.name}"
+    return path.name
+
+
+def same_dir(a: Path, b: Path) -> bool:
+    try:
+        return a.resolve() == b.resolve()
+    except (OSError, RuntimeError):
+        return a == b
+
+
+def find_space(path: Path, label: str, spaces: list[dict]) -> dict | None:
+    """An open local space for this folder: same folder first, else same name."""
+    local = [sp for sp in spaces if not sp["machine"]]
+    for sp in local:
+        if same_dir(expand(sp["folder"] or "~"), path):
+            return sp
+    return next((sp for sp in local if sp["name"] == label), None)
 
 
 def home_abbrev(path: Path) -> str:
@@ -203,16 +244,42 @@ def home_abbrev(path: Path) -> str:
 # --------------------------------------------------------------------------- #
 # picker
 # --------------------------------------------------------------------------- #
-def build_rows(cfg: dict, workspaces: list[dict]) -> list[tuple[str, str, str]]:
+def space_where(sp: dict) -> str:
+    folder = sp["folder"] or "~"
+    if sp["machine"]:
+        return f"{sp['machine']}:{folder}"
+    return home_abbrev(expand(folder))
+
+
+def build_rows(cfg: dict, spaces: list[dict]) -> list[tuple[str, str, str]]:
     """Return (display, kind, payload) rows for the picker."""
     rows: list[tuple[str, str, str]] = []
     if cfg["include_open_workspaces"]:
-        for ws in workspaces:
-            mark = "●" if ws.get("focused") else "○"
-            rows.append((f"{mark} {ws['label']}", "ws", ws["workspace_id"]))
+        for sp in spaces:
+            mark = "●" if sp["active"] else "○"
+            rows.append((f"{mark} {sp['name']}  ({space_where(sp)})", "space", sp["id"]))
     for d in gather_dirs(cfg):
         rows.append((f"  {home_abbrev(d)}", "dir", str(d)))
     return rows
+
+
+def print_json(cfg: dict) -> None:
+    """Folder candidates for the herdr-app modal, which reads open spaces live itself."""
+    dirs = []
+    for d in gather_dirs(cfg):
+        try:
+            real = str(d.resolve())
+        except (OSError, RuntimeError):
+            real = str(d)
+        dirs.append({
+            "path": str(d),
+            "real": real,  # symlinks resolved, for matching a space's folder
+            "display": home_abbrev(d),
+            "label": label_for(d, cfg["label_style"]),
+        })
+    json.dump({"include_open_spaces": bool(cfg["include_open_workspaces"]),
+               "dirs": dirs}, sys.stdout)
+    print()
 
 
 def run_fzf(rows: list[tuple[str, str, str]]) -> tuple[str, str] | None:
@@ -226,7 +293,7 @@ def run_fzf(rows: list[tuple[str, str, str]]) -> tuple[str, str] | None:
         "--reverse",
         "--border",
         "--prompt", "space> ",
-        "--header", "enter: open/focus workspace   esc: cancel",
+        "--header", "enter: open/show space   esc: cancel",
         "--preview", preview,
         "--preview-window", "right,50%,border-left",
     ]
@@ -248,31 +315,36 @@ def run_fzf(rows: list[tuple[str, str, str]]) -> tuple[str, str] | None:
 # --------------------------------------------------------------------------- #
 # action
 # --------------------------------------------------------------------------- #
-def open_or_focus(kind: str, payload: str, cfg: dict, workspaces: list[dict],
+def open_or_focus(kind: str, payload: str, cfg: dict, spaces: list[dict],
                   dry_run: bool) -> None:
-    if kind == "ws":
-        act = ("workspace", "focus", payload)
-        return _run(act, dry_run)
+    if kind == "space":
+        return do("space.select", {"id": payload}, dry_run)
 
     path = Path(payload)
     label = label_for(path, cfg["label_style"])
-    existing = next((w for w in workspaces if w.get("label") == label), None)
+    existing = find_space(path, label, spaces)
     if existing:
-        _run(("workspace", "focus", existing["workspace_id"]), dry_run)
+        do("space.select", {"id": existing["id"]}, dry_run)
     else:
-        _run(
-            ("workspace", "create", "--cwd", str(path), "--label", label, "--focus"),
-            dry_run,
-        )
+        # new spaces are shown immediately; no separate select needed
+        do("space.new", {"name": label, "folder": str(path)}, dry_run)
 
 
-def _run(args: tuple[str, ...], dry_run: bool) -> None:
+def do(command: str, args: dict, dry_run: bool) -> None:
+    # One JSON object rather than `--key value`: herdr-app parses bare values
+    # as JSON, so an id or name like "123" would arrive as a number and fail.
+    argv = ["herdr-app", "do", command, json.dumps(args)]
     if dry_run:
-        print("herdr " + " ".join(args))
+        print(shlex.join(argv))
         return
-    cp = herdr(*args)
+    cp = herdr_app(*argv[1:])
     if cp.returncode != 0:
-        die((cp.stderr or cp.stdout or "herdr command failed").strip())
+        msg = (cp.stdout or cp.stderr or "").strip()
+        try:
+            msg = json.loads(msg)["error"]
+        except (json.JSONDecodeError, KeyError, TypeError):
+            pass
+        die(msg or f"herdr-app do {command} failed")
 
 
 # --------------------------------------------------------------------------- #
@@ -280,7 +352,7 @@ def _run(args: tuple[str, ...], dry_run: bool) -> None:
 # --------------------------------------------------------------------------- #
 def main() -> None:
     ap = argparse.ArgumentParser(prog="herdr-spaces", add_help=True,
-                                 description="fzf project-folder picker for herdr workspaces")
+                                 description="fzf project-folder picker for herdr-app spaces")
     ap.add_argument("--config", type=Path, default=DEFAULT_CONFIG,
                     help=f"config file (default: {DEFAULT_CONFIG})")
     ap.add_argument("--default-config", action="store_true",
@@ -288,7 +360,10 @@ def main() -> None:
     ap.add_argument("--list", action="store_true",
                     help="print candidate rows and exit (no fzf, no changes)")
     ap.add_argument("--dry-run", action="store_true",
-                    help="pick, but print the herdr command instead of running it")
+                    help="pick, but print the herdr-app command instead of running it")
+    ap.add_argument("--json", action="store_true",
+                    help="print the configured project folders as JSON and exit "
+                         "(what the herdr-app modal reads; open spaces not included)")
     args = ap.parse_args()
 
     if args.default_config:
@@ -296,22 +371,28 @@ def main() -> None:
         return
 
     cfg = load_config(args.config)
-    workspaces = list_workspaces() if cfg["include_open_workspaces"] else []
+
+    if args.json:
+        print_json(cfg)
+        return
+    # Always fetched: also needed to focus (not duplicate) an open space when
+    # include_open_workspaces = false.
+    spaces = list_spaces()
 
     if args.list:
-        for display, kind, payload in build_rows(cfg, workspaces):
+        for display, kind, payload in build_rows(cfg, spaces):
             print(f"{kind}\t{payload}\t{display.strip()}")
         return
 
-    rows = build_rows(cfg, workspaces)
+    rows = build_rows(cfg, spaces)
     if not rows:
         die("no candidates — check `folders` paths in your config")
 
     picked = run_fzf(rows)
     if picked is None:
         return  # cancelled, quietly
-    # workspace list may be stale-free enough; re-use what we fetched
-    open_or_focus(picked[0], picked[1], cfg, workspaces, args.dry_run)
+    # space list is fresh enough; re-use what we fetched
+    open_or_focus(picked[0], picked[1], cfg, spaces, args.dry_run)
 
 
 if __name__ == "__main__":

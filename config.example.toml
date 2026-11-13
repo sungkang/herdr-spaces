@@ -18,11 +18,12 @@ folder_depth = 1
 # Include dot-directories (e.g. .config) when fanning. Default false.
 include_hidden = false
 
-# Also list currently-open herdr workspaces at the top of the picker,
+# Also list currently-open herdr-app spaces at the top of the picker,
 # so you can jump straight to a running one. Default true.
 include_open_workspaces = true
 
-# Label used when CREATING a new workspace, and how "already open?" is matched:
+# Name used when CREATING a new space, and (after its folder) how "already
+# open?" is matched:
 #   "name"        -> folder basename            (e.g. "herdr-spaces")
 #   "parent-name" -> parent/basename            (e.g. "dev/herdr-spaces")
 # Use "parent-name" if you have same-named folders under different roots.

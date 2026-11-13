@@ -1,2 +1,6 @@
 __pycache__/
 *.pyc
+
+# written by herdr-app into linked mods (editor typings)
+mod/*.d.ts
+mod/jsconfig.json
